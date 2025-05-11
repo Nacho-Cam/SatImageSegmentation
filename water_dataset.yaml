@@ -1,0 +1,5 @@
+names:
+- water
+nc: 1
+train: data\raw\water_bodies\images
+val: data\raw\water_bodies\images
