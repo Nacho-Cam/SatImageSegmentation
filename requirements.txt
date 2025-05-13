@@ -1,0 +1,12 @@
+torch
+transformers
+numpy
+opencv-python
+pillow
+matplotlib
+tqdm
+scikit-learn
+scikit-image
+tifffile
+kagglehub
+imagecodecs
