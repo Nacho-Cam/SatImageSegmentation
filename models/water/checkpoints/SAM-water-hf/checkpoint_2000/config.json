@@ -1,5 +1,5 @@
 {
-  "_name_or_path": "models/water/checkpoints/SAM-water-hf",
+  "_name_or_path": "models\\water\\checkpoints\\SAM-water-hf\\checkpoint_1200",
   "architectures": [
     "SamModel"
   ],

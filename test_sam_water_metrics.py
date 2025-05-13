@@ -7,6 +7,12 @@ from transformers import SamModel, SamProcessor
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 import matplotlib.pyplot as plt
 from skimage.exposure import match_histograms
+import importlib.util
+from sklearn.metrics import jaccard_score
+
+def dice_score(y_true, y_pred):
+    intersection = np.sum(y_true * y_pred)
+    return 2. * intersection / (np.sum(y_true) + np.sum(y_pred) + 1e-8)
 
 # Paths
 MODEL_DIR = 'models/water/checkpoints/SAM-water-hf'
@@ -41,57 +47,35 @@ if len(paired) < 100:
 else:
     test_pairs = random.sample(paired, 100)
 
-# Load model
-model = SamModel.from_pretrained(MODEL_DIR)
-processor = SamProcessor.from_pretrained(MODEL_DIR)
+# Dynamically import stack_preprocessing_variants and patch_first_conv from finetune_sam.py
+finetune_path = os.path.join(os.path.dirname(__file__), 'models/water/finetune_sam.py') if not os.path.exists('finetune_sam.py') else 'finetune_sam.py'
+spec = importlib.util.spec_from_file_location('finetune_sam', finetune_path)
+finetune_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(finetune_mod)
+stack_preprocessing_variants = finetune_mod.stack_preprocessing_variants
+patch_first_conv = finetune_mod.patch_first_conv
+
+# Load model and patch for 15 channels
+model = SamModel.from_pretrained(MODEL_DIR, ignore_mismatched_sizes=True)
+model = patch_first_conv(model, new_in_channels=15)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model.to(device)
 model.eval()
 
-def match_histogram_to_reference(new_img, ref_img):
-    if ref_img is None:
-        return new_img
-    new_np = np.array(new_img)
-    ref_np = np.array(ref_img)
-    matched = match_histograms(new_np, ref_np, channel_axis=-1)
-    return Image.fromarray(np.uint8(np.clip(matched, 0, 255)))
+# Use 1024x1024 as in training
+TARGET_SIZE = (1024, 1024)
 
-# Preprocessing (same as training, but with histogram matching)
-def preprocess_image(img, target_size=(256, 256)):
-    img = img.convert('RGB').resize(target_size, Image.BILINEAR)
-    # Histogram match to reference
-    img = match_histogram_to_reference(img, ref_img)
-    img_np = np.array(img).astype(np.float32) / 255.0
-    imagenet_mean = np.array([0.485, 0.456, 0.406])
-    imagenet_std = np.array([0.229, 0.224, 0.225])
-    img_np = (img_np - imagenet_mean) / imagenet_std
-    img = Image.fromarray(np.clip((img_np * 255), 0, 255).astype(np.uint8))
-    return img
-
-def preprocess_mask(mask, target_size=(256, 256)):
-    mask = mask.convert('L').resize(target_size, Image.NEAREST)
-    mask_np = np.array(mask)
-    mask_bin = (mask_np > 127).astype(np.uint8)
-    return mask_bin
-
-# Collect all predictions and ground truths
 y_true = []
 y_pred = []
 
 for img_path, mask_path in test_pairs:
-    img_name = os.path.basename(img_path)
-    if img_name in completed:
-        continue  # Skip already processed
-    img = Image.open(img_path)
-    mask = Image.open(mask_path)
-    img_prep = preprocess_image(img)
-    mask_bin = preprocess_mask(mask)
-    inputs = processor(images=img_prep, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}  # Move tensors to GPU if available
+    stacked = stack_preprocessing_variants(img_path, target_size=TARGET_SIZE)
+    mask_np = np.array(Image.open(mask_path).convert('L').resize(TARGET_SIZE, Image.NEAREST))
+    mask_bin = (mask_np > 127).astype(np.uint8)
+    image_tensor = torch.from_numpy(stacked.transpose(2, 0, 1)).float().unsqueeze(0).to(device) / 255.0
     with torch.no_grad():
-        outputs = model(**inputs)
+        outputs = model(image_tensor)
         pred = outputs.pred_masks
-        # Squeeze to 4D
         while pred.ndim > 4:
             if pred.shape[2] == 1:
                 pred = pred.squeeze(2)
@@ -109,12 +93,8 @@ for img_path, mask_path in test_pairs:
             pred = pred[:, 0:1, :, :]
         mask_pred = pred[0, 0].cpu().numpy()
         mask_pred_bin = (mask_pred > 0.5).astype(np.uint8)
-    # Flatten for metrics
     y_true.extend(mask_bin.flatten())
     y_pred.extend(mask_pred_bin.flatten())
-    # Save progress
-    with open(COMPLETED_FILE, "a") as f:
-        f.write(f"{img_name}\n")
 
 # Metrics
 cm = confusion_matrix(y_true, y_pred)
@@ -122,20 +102,21 @@ acc = accuracy_score(y_true, y_pred)
 prec = precision_score(y_true, y_pred, zero_division=0)
 rec = recall_score(y_true, y_pred, zero_division=0)
 f1 = f1_score(y_true, y_pred, zero_division=0)
+iou = jaccard_score(y_true, y_pred, zero_division=0)
+dice = dice_score(np.array(y_true), np.array(y_pred))
 
 print("Confusion Matrix:\n", cm)
 print(f"Accuracy: {acc:.4f}")
 print(f"Precision: {prec:.4f}")
 print(f"Recall: {rec:.4f}")
 print(f"F1 Score: {f1:.4f}")
+print(f"IoU (Jaccard): {iou:.4f}")
+print(f"Dice Score: {dice:.4f}")
 
-# Optional: plot confusion matrix
 plt.figure(figsize=(4,4))
 plt.imshow(cm, cmap='Blues')
 plt.title('Confusion Matrix')
 plt.xlabel('Predicted')
 plt.ylabel('True')
-plt.xticks([0, 1], ['Background', 'Water'])
-plt.yticks([0, 1], ['Background', 'Water'])
 plt.colorbar()
 plt.show()
