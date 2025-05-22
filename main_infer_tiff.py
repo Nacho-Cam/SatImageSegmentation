@@ -103,7 +103,8 @@ else:
     selected_water_images = random.sample(water_image_files, 10)
 water_imgs = []
 water_mask_imgs = []
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cpu')
+#''''cuda' if torch.cuda.is_available() else''' 
 
 # --- Model loading with checkpoint resume option ---
 RESUME_CHECKPOINT = None  # e.g., 'models/water/checkpoints/SAM-water-hf/checkpoint_2000' or None for default

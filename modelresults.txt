@@ -1,0 +1,9 @@
+Confusion Matrix:
+ [[63241425  1935512]
+ [23069647 16611016]]
+Accuracy: 0.7615
+Precision: 0.8956
+Recall: 0.4186
+F1 Score: 0.5706
+IoU (Jaccard): 0.3991
+Dice Score: 0.5706

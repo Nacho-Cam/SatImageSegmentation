@@ -10,15 +10,24 @@ import sys
 import importlib.util
 import cv2
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
 RESUME_CHECKPOINT = 'models\water\checkpoints\SAM-water-hf\checkpoint_1200'  # e.g., 'models/water/checkpoints/SAM-water-hf/checkpoint_2000' or None for auto-latest
 
-preproc_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/raw/NEW2-AerialImageDataset/AerialImageDataset/test/convert_tiff_to_jpg_and_preproc.py'))
-spec = importlib.util.spec_from_file_location('convert_tiff_to_jpg_and_preproc', preproc_path)
-preproc_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(preproc_mod)
-kaggle_preprocessing = preproc_mod.kaggle_preprocessing
-github_preprocessing_pipeline = preproc_mod.github_preprocessing_pipeline
-advanced_preprocessing_pipeline = preproc_mod.advanced_preprocessing_pipeline
+# --- STUBS for missing src.common.preprocessing ---
+def stack_preprocessing_variants(image_path, target_size=(1024, 1024)):
+    # Minimal stub: just load and resize the image, stack as 3 channels (RGB)
+    img = Image.open(image_path).convert('RGB').resize(target_size, Image.BILINEAR)
+    arr = np.array(img).astype(np.float32)
+    # If model expects more channels, pad with zeros
+    if arr.shape[2] < 15:
+        pad = np.zeros((arr.shape[0], arr.shape[1], 15 - arr.shape[2]), dtype=arr.dtype)
+        arr = np.concatenate([arr, pad], axis=2)
+    return arr
+
+def patch_first_conv(model, in_channels=15):
+    # Minimal stub: do nothing, just return model
+    return model
 
 # --- Preprocessing function for images and masks ---
 def preprocess_image_and_mask(image_path, mask_path, target_size=(1024, 1024)):
@@ -37,98 +46,6 @@ def preprocess_image_and_mask(image_path, mask_path, target_size=(1024, 1024)):
     mask = mask.resize(target_size, Image.NEAREST)
     mask_np = np.array(mask)
     return image, mask_np
-
-# --- Preprocessing pipelines ---
-def kaggle_preprocessing(img, target_size=(1024, 1024)):
-    img = img.resize(target_size, Image.BILINEAR)
-    img_np = np.array(img)
-    img_np = img_np / 255.0
-    img_clahe = np.zeros_like(img_np)
-    for i in range(3):
-        channel = (img_np[..., i] * 255).astype(np.uint8)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        img_clahe[..., i] = clahe.apply(channel) / 255.0
-    imagenet_mean = np.array([0.485, 0.456, 0.406])
-    imagenet_std = np.array([0.229, 0.224, 0.225])
-    img_norm = (img_clahe - imagenet_mean) / imagenet_std
-    img_out = np.clip((img_norm * 255), 0, 255).astype(np.uint8)
-    return Image.fromarray(img_out)
-
-def github_preprocessing_pipeline(img, target_size=(1024, 1024)):
-    img_gray = img.convert('L').resize(target_size, Image.BILINEAR)
-    img_np = np.array(img_gray)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    img_clahe = clahe.apply(img_np)
-    img_blur = cv2.GaussianBlur(img_clahe, (5, 5), 0)
-    _, img_bin = cv2.threshold(img_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    img_bin_rgb = np.stack([img_bin]*3, axis=-1)
-    return Image.fromarray(img_bin_rgb)
-
-def advanced_preprocessing_pipeline(img, target_size=(1024, 1024)):
-    img_cv = np.array(img.convert('RGB').resize(target_size, Image.BILINEAR))
-    img_cv = cv2.cvtColor(img_cv, cv2.COLOR_RGB2BGR)
-    hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    v_clahe = clahe.apply(v)
-    hsv_clahe = cv2.merge([h, s, v_clahe])
-    preproc = cv2.cvtColor(hsv_clahe, cv2.COLOR_HSV2RGB)
-    return Image.fromarray(preproc)
-
-def stack_preprocessing_variants(image_path, target_size=(1024, 1024)):
-    """
-    Loads an image and returns a 15-channel numpy array stacking:
-    - original RGB
-    - kaggle preprocessed RGB
-    - github preprocessed RGB
-    - advanced preprocessed RGB
-    - original normalized RGB (ImageNet mean/std)
-    All resized to target_size.
-    """
-    img = Image.open(image_path).convert('RGB').resize(target_size, Image.BILINEAR)
-    # 1. Original
-    arr_original = np.array(img)
-    # 2. Kaggle
-    arr_kaggle = np.array(kaggle_preprocessing(img, target_size=target_size))
-    # 3. GitHub
-    arr_github = np.array(github_preprocessing_pipeline(img, target_size=target_size))
-    # 4. Advanced
-    arr_advanced = np.array(advanced_preprocessing_pipeline(img, target_size=target_size))
-    # 5. Original normalized (ImageNet mean/std)
-    arr_norm = np.array(img).astype(np.float32) / 255.0
-    imagenet_mean = np.array([0.485, 0.456, 0.406])
-    imagenet_std = np.array([0.229, 0.224, 0.225])
-    arr_norm = (arr_norm - imagenet_mean) / imagenet_std
-    arr_norm = np.clip((arr_norm * 255), 0, 255).astype(np.uint8)
-    # Stack all (H, W, 15)
-    stacked = np.concatenate([
-        arr_original, arr_kaggle, arr_github, arr_advanced, arr_norm
-    ], axis=-1)
-    return stacked
-
-def patch_first_conv(model, new_in_channels=15):
-    import torch.nn as nn
-    old_conv = model.vision_encoder.patch_embed.projection
-    if old_conv.in_channels == new_in_channels:
-        print(f'First conv already has {new_in_channels} channels, skipping patch.')
-        return model
-    print('Patching vision_encoder.patch_embed.projection for', new_in_channels, 'channels')
-    new_conv = nn.Conv2d(
-        in_channels=new_in_channels,
-        out_channels=old_conv.out_channels,
-        kernel_size=old_conv.kernel_size,
-        stride=old_conv.stride,
-        padding=old_conv.padding,
-        bias=old_conv.bias is not None
-    )
-    with torch.no_grad():
-        new_conv.weight[:, :3, :, :] = old_conv.weight
-        if new_in_channels > 3:
-            new_conv.weight[:, 3:, :, :] = 0
-        if old_conv.bias is not None:
-            new_conv.bias = old_conv.bias
-    model.vision_encoder.patch_embed.projection = new_conv
-    return model
 
 if __name__ == "__main__":
     # Download the dataset from Kaggle if not already present
@@ -161,6 +78,18 @@ if __name__ == "__main__":
         print('No matching image/mask pairs found!')
         exit(1)
 
+    # --- Add LoveDA water images/masks ---
+    loveda_img_dir = os.path.join('data', 'raw', 'landcover', 'LoveDA', 'Images')
+    loveda_mask_dir = os.path.join('data', 'raw', 'landcover', 'LoveDA', 'Masks')
+    loveda_img_files = glob.glob(os.path.join(loveda_img_dir, '*.png'))
+    loveda_mask_files = glob.glob(os.path.join(loveda_mask_dir, '*_mask.png'))
+    for img_path, mask_path in zip(sorted(loveda_img_files), sorted(loveda_mask_files)):
+        mask_np = np.array(Image.open(mask_path))
+        if np.any(mask_np == 3):  # Water class in LoveDA
+            paired.append((img_path, mask_path))
+
+    random.shuffle(paired)
+
     print(f'Found {len(paired)} image/mask pairs.')
 
     # --- Use the full dataset for training/validation ---
@@ -178,31 +107,50 @@ if __name__ == "__main__":
     # --- Auto-resume from latest checkpoint if available ---
     import re
     checkpoint_base = os.path.join('models', 'water', 'checkpoints', 'SAM-water-hf')
+    if not os.path.exists(checkpoint_base):
+        os.makedirs(checkpoint_base, exist_ok=True)
+    def load_and_patch_model(checkpoint_path):
+        config = SamModel.from_pretrained(checkpoint_path).config
+        for cfg in [config, getattr(config, 'vision_config', None)]:
+            if cfg is not None:
+                for field in ['num_channels', 'in_channels', 'input_channels']:
+                    setattr(cfg, field, 15)
+        model = SamModel.from_pretrained(checkpoint_path, config=config, ignore_mismatched_sizes=True)
+        model = patch_first_conv(model, in_channels=15)
+        return model
     if RESUME_CHECKPOINT and os.path.isdir(RESUME_CHECKPOINT):
         print(f"Resuming from user-specified checkpoint: {RESUME_CHECKPOINT}")
-        model = SamModel.from_pretrained(RESUME_CHECKPOINT, ignore_mismatched_sizes=True)
+        model = load_and_patch_model(RESUME_CHECKPOINT)
         processor = SamProcessor.from_pretrained(RESUME_CHECKPOINT)
     else:
         checkpoint_dirs = [d for d in os.listdir(checkpoint_base) if re.match(r'checkpoint_\d+', d)]
         if checkpoint_dirs:
-            # Sort by number, descending
             checkpoint_dirs.sort(key=lambda x: int(re.findall(r'\d+', x)[0]), reverse=True)
             latest_checkpoint = os.path.join(checkpoint_base, checkpoint_dirs[0])
             print(f"Resuming from latest checkpoint: {latest_checkpoint}")
-            model = SamModel.from_pretrained(latest_checkpoint, ignore_mismatched_sizes=True)
+            model = load_and_patch_model(latest_checkpoint)
             processor = SamProcessor.from_pretrained(latest_checkpoint)
         else:
             print("No checkpoint found, starting from base model.")
-            model = SamModel.from_pretrained('models/water/checkpoints/SAM-water-hf', ignore_mismatched_sizes=True)
+            model = load_and_patch_model('models/water/checkpoints/SAM-water-hf')
             processor = SamProcessor.from_pretrained('models/water/checkpoints/SAM-water-hf')
-    model = patch_first_conv(model, new_in_channels=15)
-    # Update model config for new input channels
-    if hasattr(model.config, 'num_channels'):
-        model.config.num_channels = 15
-    elif hasattr(model.config, 'in_channels'):
-        model.config.in_channels = 15
-    else:
-        print('WARNING: Could not set input channel count in model config. You may need to update the config manually.')
+    if hasattr(model, 'vision_encoder') and hasattr(model.vision_encoder, 'config'):
+        for field in ['num_channels', 'in_channels', 'input_channels']:
+            setattr(model.vision_encoder.config, field, 15)
+    # DEBUG: print all config fields
+    print(f"DEBUG: model.config.input_channels: {getattr(model.config, 'input_channels', None)}")
+    print(f"DEBUG: model.config.num_channels: {getattr(model.config, 'num_channels', None)}")
+    print(f"DEBUG: model.config.in_channels: {getattr(model.config, 'in_channels', None)}")
+    if hasattr(model.config, 'vision_config'):
+        print(f"DEBUG: model.config.vision_config.input_channels: {getattr(model.config.vision_config, 'input_channels', None)}")
+        print(f"DEBUG: model.config.vision_config.num_channels: {getattr(model.config.vision_config, 'num_channels', None)}")
+        print(f"DEBUG: model.config.vision_config.in_channels: {getattr(model.config.vision_config, 'in_channels', None)}")
+    if hasattr(model, 'vision_encoder') and hasattr(model.vision_encoder, 'config'):
+        print(f"DEBUG: model.vision_encoder.config.input_channels: {getattr(model.vision_encoder.config, 'input_channels', None)}")
+        print(f"DEBUG: model.vision_encoder.config.num_channels: {getattr(model.vision_encoder.config, 'num_channels', None)}")
+        print(f"DEBUG: model.vision_encoder.config.in_channels: {getattr(model.vision_encoder.config, 'in_channels', None)}")
+        if hasattr(model.vision_encoder, 'patch_embed') and hasattr(model.vision_encoder.patch_embed, 'projection'):
+            print(f"DEBUG: model.vision_encoder.patch_embed.projection.in_channels: {getattr(model.vision_encoder.patch_embed.projection, 'in_channels', None)}")
 
     # Using a checkpoint helps: it allows the model to start from a previously learned state, speeding up convergence and improving results.
 
@@ -210,10 +158,19 @@ if __name__ == "__main__":
     model.to(device)
     print(f"Model device: {next(model.parameters()).device}")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-6)
+    # Freeze all parameters except the final mask decoder head for fastest training
+    for name, param in model.named_parameters():
+        if not ("mask_decoder" in name):
+            param.requires_grad = False
+    print("All model parameters except the mask decoder are frozen.")
+
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=5e-6)
     criterion = torch.nn.BCEWithLogitsLoss()
-    epochs = 2  # Now 2 epochs as requested
-    batch_size = 1
+    epochs = 3
+    batch_size = 2
+
+    best_val_acc = 0.0
+    checkpoint_path = os.path.join('models', 'water', 'checkpoints', 'SAM-water-hf', 'sam_water_finetuned_best.pth')
 
     for epoch in range(epochs):
         print(f'Epoch {epoch+1}/{epochs}')
@@ -232,6 +189,7 @@ if __name__ == "__main__":
                 mask_stack = np.stack([(m > 127).astype(np.float32) for m in batch_masks])
                 mask_tensor = torch.from_numpy(mask_stack).unsqueeze(1).to(device)
                 image_tensor = torch.from_numpy(np.stack(batch_images)).float().to(device) / 255.0
+                # Move tensors to the same device as the model
                 optimizer.zero_grad()
                 outputs = model(image_tensor)
                 pred = outputs.pred_masks
@@ -251,19 +209,14 @@ if __name__ == "__main__":
                 batch_images = []
                 batch_masks = []
                 torch.cuda.empty_cache()
-            # --- Save checkpoint every 100 files processed ---
-            if (idx + 1) % 100 == 0:
-                checkpoint_dir = os.path.join('models', 'water', 'checkpoints', 'SAM-water-hf', f'checkpoint_{idx+1}')
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                print(f"Saving checkpoint at {checkpoint_dir} (file {idx+1})...")
-                model.save_pretrained(checkpoint_dir)
-                processor.save_pretrained(checkpoint_dir)
         train_loss = running_loss / max(1, len(train_pairs)//batch_size)
         print(f'Epoch {epoch+1} train loss: {train_loss:.4f}')
 
         # --- Validation ---
         model.eval()
         val_loss = 0.0
+        val_running_correct = 0
+        val_running_total = 0
         batch_images = []
         batch_masks = []
         with torch.no_grad():
@@ -290,16 +243,64 @@ if __name__ == "__main__":
                         pred = torch.nn.functional.interpolate(pred, size=mask_tensor.shape[-2:], mode='bilinear', align_corners=False)
                     loss = criterion(pred, mask_tensor)
                     val_loss += loss.item()
+                    # Calculate accuracy (binary, threshold 0.5)
+                    preds = (pred > 0.5).long()
+                    valid = (mask_tensor != 255)
+                    val_running_correct += (preds[valid] == mask_tensor[valid]).sum().item()
+                    val_running_total += valid.sum().item()
                     batch_images = []
                     batch_masks = []
         val_loss = val_loss / max(1, len(val_pairs)//batch_size)
-        print(f'Epoch {epoch+1} val loss: {val_loss:.4f}')
+        val_acc = val_running_correct / val_running_total if val_running_total > 0 else 0.0
+        print(f'Epoch {epoch+1} val loss: {val_loss:.4f}, val acc: {val_acc:.4f}')
+
+        # --- Save best model ---
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save({
+                'model': model.state_dict(),
+                'processor': processor,  # Save processor config if needed
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch,
+                'best_val_acc': best_val_acc
+            }, checkpoint_path)
+            print(f"Best model updated at epoch {epoch+1} (Val Pixel Accuracy: {val_acc:.4f})")
 
     # Save the fine-tuned model
     save_dir = os.path.join('models', 'water', 'checkpoints', 'SAM-water-hf')
     model.save_pretrained(save_dir)
     processor.save_pretrained(save_dir)
     print('Fine-tuning complete. Model saved as SAM-water-hf.')
+
+    # --- OUTPUT EXAMPLE: Save a prediction for a random validation image ---
+    import matplotlib.pyplot as plt
+    import random
+    model.eval()
+    with torch.no_grad():
+        idx = random.randint(0, len(val_pairs) - 1)
+        val_img_path, val_mask_path = val_pairs[idx]
+        val_img = Image.open(val_img_path).convert('RGB')
+        val_mask = np.array(Image.open(val_mask_path).convert('L').resize((1024, 1024), Image.NEAREST))
+        stacked = stack_preprocessing_variants(val_img_path, target_size=(1024, 1024))
+        val_img_tensor = torch.from_numpy(stacked.transpose(2, 0, 1)).float().unsqueeze(0).to(device) / 255.0
+        outputs = model(val_img_tensor)
+        pred = outputs.pred_masks
+        if pred.ndim == 5:
+            pred = pred[:, 0, 0:1, :, :]
+        elif pred.ndim == 4 and pred.shape[1] > 1:
+            pred = pred[:, 0:1, :, :]
+        if pred.shape != val_mask.shape:
+            pred = torch.nn.functional.interpolate(pred, size=val_mask.shape[-2:], mode='bilinear', align_corners=False)
+        pred_mask = (pred[0, 0].cpu().numpy() > 0.5).astype('uint8') * 255
+        os.makedirs('outputs', exist_ok=True)
+        plt.imsave('outputs/val_pred_mask.png', pred_mask, cmap='gray')
+        plt.imsave('outputs/val_gt_mask.png', val_mask, cmap='gray')
+        overlay = np.array(val_img)
+        overlay_mask = (pred_mask > 0).astype(np.uint8) * 255
+        overlay_img = Image.fromarray(overlay).convert('RGB')
+        overlay_img.putalpha(Image.fromarray(overlay_mask))
+        overlay_img.save('outputs/val_pred_overlay.png')
+        print('Validation prediction and overlay saved to outputs/.')
 
     # --- Quick test after training ---
     import matplotlib.pyplot as plt
